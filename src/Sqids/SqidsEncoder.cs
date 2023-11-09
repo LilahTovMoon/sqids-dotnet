@@ -25,7 +25,7 @@ public sealed class SqidsEncoder
 	private const int MaxMinLength = 255;
 	private const int MaxStackallocSize = 256; // NOTE: In bytes — this value is essentially arbitrary, the Microsoft docs is using 1024 but recommends being more conservative when choosing the value (https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/operators/stackalloc), Hashids apparently uses 512 (https://github.com/ullmark/hashids.net/blob/9b1c69de4eedddf9d352c96117d8122af202e90f/src/Hashids.net/Hashids.cs#L17), and this article (https://vcsjones.dev/stackalloc/) uses 256. I've tried to be pretty cautious and gone with a low value.
 
-	private readonly char[] _alphabet;
+	private readonly byte[] _alphabet;
 	private readonly int _minLength;
 	private readonly string[] _blockList;
 
@@ -112,7 +112,7 @@ public sealed class SqidsEncoder
 		);
 		_blockList = options.BlockList.ToArray(); // NOTE: Arrays are faster to iterate than HashSets, so we construct an array here.
 
-		_alphabet = options.Alphabet.ToCharArray();
+		_alphabet = Encoding.UTF8.GetBytes(options.Alphabet);
 		ConsistentShuffle(_alphabet);
 	}
 
@@ -206,48 +206,47 @@ public sealed class SqidsEncoder
 		offset = (numbers.Length + offset) % _alphabet.Length;
 		offset = (offset + increment) % _alphabet.Length;
 
-		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize // NOTE: We multiply the number of characters by the size of a `char` to get the actual amount of memory that would be allocated.
-			? new char[_alphabet.Length]
-			: stackalloc char[_alphabet.Length];
+		var alphabetTemp = _alphabet.Length * sizeof(byte) > MaxStackallocSize // NOTE: We multiply the number of characters by the size of a `byte` to get the actual amount of memory that would be allocated.
+			? new byte[_alphabet.Length]
+			: stackalloc byte[_alphabet.Length];
 		var alphabetSpan = _alphabet.AsSpan();
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
 
-		char prefix = alphabetTemp[0];
+		byte prefix = alphabetTemp[0];
 		alphabetTemp.Reverse();
 
-		var builder = new StringBuilder(); // TODO: pool a la Hashids.net?
-		builder.Append(prefix);
+		var builder = new byte[16]; // TODO: pool a la Hashids.net?
+		var index = 0;
+		builder[index++] = prefix;
 
 		for (int i = 0; i < numbers.Length; i++)
 		{
 			var number = numbers[i];
 			var alphabetWithoutSeparator = alphabetTemp[1..]; // NOTE: Excludes the first character — which is the separator
-			var encodedNumber = ToId(number, alphabetWithoutSeparator);
-			builder.Append(encodedNumber);
+			ToId(number, alphabetWithoutSeparator, ref index, builder);
 
 			if (i >= numbers.Length - 1) // NOTE: If the last one
 				continue;
 
-			char separator = alphabetTemp[0];
-			builder.Append(separator);
+			builder[index++] = alphabetTemp[0];
 			ConsistentShuffle(alphabetTemp);
 		}
 
 		if (builder.Length < _minLength)
 		{
-			char separator = alphabetTemp[0];
-			builder.Append(separator);
+			builder[index++] = alphabetTemp[0];
 
 			while (builder.Length < _minLength)
 			{
 				ConsistentShuffle(alphabetTemp);
 				int toIndex = Math.Min(_minLength - builder.Length, _alphabet.Length);
-				builder.Append(alphabetTemp[..toIndex]);
+				Array.Copy(alphabetTemp.ToArray(), 0, builder, index, toIndex);
+				index += toIndex;
 			}
 		}
 
-		string result = builder.ToString();
+		string result = Encoding.UTF8.GetString(builder.AsSpan()[..index].ToArray());
 
 		if (IsBlockedId(result.AsSpan()))
 			result = Encode(numbers, increment + 1);
@@ -265,9 +264,9 @@ public sealed class SqidsEncoder
 	/// empty, or includes characters not found in the alphabet.
 	/// </returns>
 #if NET7_0_OR_GREATER
-	public IReadOnlyList<T> Decode(ReadOnlySpan<char> id)
+	public IReadOnlyList<T> Decode(ReadOnlySpan<byte> id)
 #else
-	public IReadOnlyList<int> Decode(ReadOnlySpan<char> id)
+	public IReadOnlyList<int> Decode(ReadOnlySpan<byte> id)
 #endif
 	{
 		if (id.IsEmpty)
@@ -277,7 +276,7 @@ public sealed class SqidsEncoder
 			return Array.Empty<int>();
 #endif
 
-		foreach (char c in id)
+		foreach (byte c in id)
 			if (!_alphabet.Contains(c))
 #if NET7_0_OR_GREATER
 				return Array.Empty<T>();
@@ -287,12 +286,12 @@ public sealed class SqidsEncoder
 
 		var alphabetSpan = _alphabet.AsSpan();
 
-		char prefix = id[0];
+		byte prefix = id[0];
 		int offset = alphabetSpan.IndexOf(prefix);
 
-		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize
-			? new char[_alphabet.Length]
-			: stackalloc char[_alphabet.Length];
+		Span<byte> alphabetTemp = _alphabet.Length * sizeof(byte) > MaxStackallocSize
+			? new byte[_alphabet.Length]
+			: stackalloc byte[_alphabet.Length];
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
 
@@ -307,7 +306,7 @@ public sealed class SqidsEncoder
 #endif
 		while (!id.IsEmpty)
 		{
-			char separator = alphabetTemp[0];
+			byte separator = alphabetTemp[0];
 
 			var separatorIndex = id.IndexOf(separator);
 			var chunk = separatorIndex == -1 ? id : id[..separatorIndex]; // NOTE: The first part of `id` (every thing to the left of the separator) represents the number that we ought to decode.
@@ -338,7 +337,9 @@ public sealed class SqidsEncoder
 	/// if the ID represents a single number); or an empty array if the input ID is null,
 	/// empty, or includes characters not found in the alphabet.
 	/// </returns>
-	public IReadOnlyList<int> Decode(string id) => Decode(id.AsSpan());
+	public IReadOnlyList<int> Decode(string id) => Decode(Encoding.UTF8.GetBytes(id));
+#else
+	public IReadOnlyList<T> Decode(string id) => Decode(Encoding.UTF8.GetBytes(id));
 #endif
 
 	private bool IsBlockedId(ReadOnlySpan<char> id)
@@ -365,7 +366,7 @@ public sealed class SqidsEncoder
 	}
 
 	// NOTE: Shuffles a span of characters in place. The shuffle produces consistent results.
-	private static void ConsistentShuffle(Span<char> chars)
+	private static void ConsistentShuffle(Span<byte> chars)
 	{
 		for (int i = 0, j = chars.Length - 1; j > 0; i++, j--)
 		{
@@ -375,35 +376,33 @@ public sealed class SqidsEncoder
 	}
 
 #if NET7_0_OR_GREATER
-	private static ReadOnlySpan<char> ToId(T num, ReadOnlySpan<char> alphabet)
+	private static void ToId(T num, ReadOnlySpan<byte> alphabet, ref int index, byte[] builder)
 #else
-	private static ReadOnlySpan<char> ToId(int num, ReadOnlySpan<char> alphabet)
+	private static void ToId(int num, ReadOnlySpan<byte> alphabet, ref int index, byte[] builder)
 #endif
 	{
-		var id = new StringBuilder();
-		var result = num;
-
+		var startingIndex = index;
 #if NET7_0_OR_GREATER
+		var alphabetLength = T.CreateChecked(alphabet.Length);
 		do
 		{
-			id.Insert(0, alphabet[int.CreateChecked(result % T.CreateChecked(alphabet.Length))]);
-			result = result / T.CreateChecked(alphabet.Length);
-		} while (result > T.Zero);
+			builder[index++] = alphabet[int.CreateChecked(num % alphabetLength)];
+			num /= alphabetLength;
+		} while (num > T.Zero);
 #else
 		do
 		{
-			id.Insert(0, alphabet[result % alphabet.Length]);
-			result = result / alphabet.Length;
-		} while (result > 0);
+            builder[index++] = alphabet[num % alphabet.Length];
+			num /= alphabet.Length;
+		} while (num > 0);
 #endif
-
-		return id.ToString().AsSpan(); // TODO: possibly avoid creating a string
+		Array.Reverse(builder, startingIndex, index - startingIndex);
 	}
 
 #if NET7_0_OR_GREATER
-	private static T ToNumber(ReadOnlySpan<char> id, ReadOnlySpan<char> alphabet)
+	private static T ToNumber(ReadOnlySpan<byte> id, ReadOnlySpan<byte> alphabet)
 #else
-	private static int ToNumber(ReadOnlySpan<char> id, ReadOnlySpan<char> alphabet)
+	private static int ToNumber(ReadOnlySpan<byte> id, ReadOnlySpan<byte> alphabet)
 #endif
 	{
 #if NET7_0_OR_GREATER
