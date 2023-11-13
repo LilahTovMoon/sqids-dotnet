@@ -1,4 +1,8 @@
+
+using System.Runtime.InteropServices;
+using Ganss.Text;
 #if NET7_0_OR_GREATER
+using System.Runtime.InteropServices.Marshalling;
 using System.Numerics;
 #endif
 
@@ -23,11 +27,11 @@ public sealed class SqidsEncoder
 {
 	private const int MinAlphabetLength = 3;
 	private const int MaxMinLength = 255;
-	private const int MaxStackallocSize = 256; // NOTE: In bytes — this value is essentially arbitrary, the Microsoft docs is using 1024 but recommends being more conservative when choosing the value (https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/operators/stackalloc), Hashids apparently uses 512 (https://github.com/ullmark/hashids.net/blob/9b1c69de4eedddf9d352c96117d8122af202e90f/src/Hashids.net/Hashids.cs#L17), and this article (https://vcsjones.dev/stackalloc/) uses 256. I've tried to be pretty cautious and gone with a low value.
 
 	private readonly char[] _alphabet;
 	private readonly int _minLength;
 	private readonly string[] _blockList;
+	private readonly AhoCorasick _ahoCorasick;
 
 #if NET7_0_OR_GREATER
 	/// <summary>
@@ -112,7 +116,11 @@ public sealed class SqidsEncoder
 		);
 		_blockList = options.BlockList.ToArray(); // NOTE: Arrays are faster to iterate than HashSets, so we construct an array here.
 
-		_alphabet = options.Alphabet.ToCharArray();
+		var sho = _blockList.Select(b => b.ToCharArray().Select(LeetComparator.Leetifier).ToString());
+
+		_ahoCorasick = new AhoCorasick(new LeetComparator(), sho);
+
+		_alphabet = options.Alphabet.ToArray();
 		ConsistentShuffle(_alphabet);
 	}
 
@@ -206,9 +214,7 @@ public sealed class SqidsEncoder
 		offset = (numbers.Length + offset) % _alphabet.Length;
 		offset = (offset + increment) % _alphabet.Length;
 
-		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize // NOTE: We multiply the number of characters by the size of a `char` to get the actual amount of memory that would be allocated.
-			? new char[_alphabet.Length]
-			: stackalloc char[_alphabet.Length];
+		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
 		var alphabetSpan = _alphabet.AsSpan();
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
@@ -216,43 +222,50 @@ public sealed class SqidsEncoder
 		char prefix = alphabetTemp[0];
 		alphabetTemp.Reverse();
 
-		var builder = new StringBuilder(); // TODO: pool a la Hashids.net?
-		builder.Append(prefix);
+		var builder = new List<char>(16) { prefix }; // TODO: pool a la Hashids.net?
 
 		for (int i = 0; i < numbers.Length; i++)
 		{
 			var number = numbers[i];
 			var alphabetWithoutSeparator = alphabetTemp[1..]; // NOTE: Excludes the first character — which is the separator
-			var encodedNumber = ToId(number, alphabetWithoutSeparator);
-			builder.Append(encodedNumber);
+			ToId(number, alphabetWithoutSeparator, builder);
 
 			if (i >= numbers.Length - 1) // NOTE: If the last one
 				continue;
 
 			char separator = alphabetTemp[0];
-			builder.Append(separator);
+			builder.Add(separator);
 			ConsistentShuffle(alphabetTemp);
 		}
 
-		if (builder.Length < _minLength)
+		if (builder.Count < _minLength)
 		{
 			char separator = alphabetTemp[0];
-			builder.Append(separator);
+			builder.Add(separator);
 
-			while (builder.Length < _minLength)
+			while (builder.Count < _minLength)
 			{
 				ConsistentShuffle(alphabetTemp);
-				int toIndex = Math.Min(_minLength - builder.Length, _alphabet.Length);
-				builder.Append(alphabetTemp[..toIndex]);
+				int toIndex = Math.Min(_minLength - builder.Count, _alphabet.Length);
+				builder.AddRange(alphabetTemp[..toIndex].ToArray());
 			}
 		}
 
-		string result = builder.ToString();
+#if NET7_0_OR_GREATER
+		string toCheck = new string(CollectionsMarshal.AsSpan(builder));
+#else
+		string toCheck = new string(builder.ToArray());
+#endif
 
-		if (IsBlockedId(result.AsSpan()))
-			result = Encode(numbers, increment + 1);
+		if (IsBlockedId(toCheck))
+			return Encode(numbers, increment + 1);
 
-		return result;
+// #if NET7_0_OR_GREATER
+// 		return new string(CollectionsMarshal.AsSpan(builder));
+// #else
+// 		return new string(builder.ToArray());
+// #endif
+		return toCheck;
 	}
 
 	/// <summary>
@@ -290,9 +303,7 @@ public sealed class SqidsEncoder
 		char prefix = id[0];
 		int offset = alphabetSpan.IndexOf(prefix);
 
-		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize
-			? new char[_alphabet.Length]
-			: stackalloc char[_alphabet.Length];
+		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
 
@@ -341,27 +352,19 @@ public sealed class SqidsEncoder
 	public IReadOnlyList<int> Decode(string id) => Decode(id.AsSpan());
 #endif
 
-	private bool IsBlockedId(ReadOnlySpan<char> id)
+	public bool IsBlockedId(string id)
 	{
-		foreach (string word in _blockList)
-		{
-			if (word.Length > id.Length)
-				continue;
-
-			if ((id.Length <= 3 || word.Length <= 3) &&
-				id.Equals(word.AsSpan(), StringComparison.OrdinalIgnoreCase))
-				return true;
-
-			if (word.Any(char.IsDigit) &&
-				(id.StartsWith(word.AsSpan(), StringComparison.OrdinalIgnoreCase) ||
-				 id.EndsWith(word.AsSpan(), StringComparison.OrdinalIgnoreCase)))
-				return true;
-
-			if (id.Contains(word.AsSpan(), StringComparison.OrdinalIgnoreCase))
-				return true;
-		}
-
-		return false;
+// 		// Span<char> output = stackalloc char[id.Length];
+// 		// for (var i = 0; i < id.Length; i++)
+// 		// {
+// 		// 	output[i] = Leetifier(id[i]);
+// 		// }
+// #if NET7_0_OR_GREATER
+// 		string toCheck = new string(id);
+// #else
+// 		string toCheck = new string(id.ToArray());
+// #endif
+		return _ahoCorasick.Search(id).Any();
 	}
 
 	// NOTE: Shuffles a span of characters in place. The shuffle produces consistent results.
@@ -375,29 +378,27 @@ public sealed class SqidsEncoder
 	}
 
 #if NET7_0_OR_GREATER
-	private static ReadOnlySpan<char> ToId(T num, ReadOnlySpan<char> alphabet)
+	private static void ToId(T num, ReadOnlySpan<char> alphabet, List<char> builder)
 #else
-	private static ReadOnlySpan<char> ToId(int num, ReadOnlySpan<char> alphabet)
+	private static void ToId(int num, ReadOnlySpan<char> alphabet, List<char> builder)
 #endif
 	{
-		var id = new StringBuilder();
-		var result = num;
-
+		int start = builder.Count;
 #if NET7_0_OR_GREATER
+		T length = T.CreateChecked(alphabet.Length);
 		do
 		{
-			id.Insert(0, alphabet[int.CreateChecked(result % T.CreateChecked(alphabet.Length))]);
-			result = result / T.CreateChecked(alphabet.Length);
-		} while (result > T.Zero);
+			builder.Add(alphabet[int.CreateChecked(num % length)]);
+			num /= T.CreateChecked(alphabet.Length);
+		} while (num > T.Zero);
 #else
 		do
 		{
-			id.Insert(0, alphabet[result % alphabet.Length]);
-			result = result / alphabet.Length;
-		} while (result > 0);
+			builder.Add(alphabet[num % alphabet.Length]);
+			num /= alphabet.Length;
+		} while (num > 0);
 #endif
-
-		return id.ToString().AsSpan(); // TODO: possibly avoid creating a string
+		builder.Reverse(start, builder.Count - start);
 	}
 
 #if NET7_0_OR_GREATER

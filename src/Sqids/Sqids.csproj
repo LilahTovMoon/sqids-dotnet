@@ -6,6 +6,8 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<OutputType>Library</OutputType>
+		<RestoreSources>$(RestoreSources);/Users/shoshana/Developer/AhoCorasick/AhoCorasick/bin/Release/;https://api.nuget.org/v3/index.json</RestoreSources>
+
 
 		<PackageId>Sqids</PackageId>
 		<Description>Official .NET port of Sqids. Generate short YouTube-looking IDs from numbers.</Description>
@@ -23,6 +25,7 @@
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<IncludeSymbols>true</IncludeSymbols>
 		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(TargetFramework)'=='netstandard2.0'">
@@ -41,6 +44,10 @@
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
 		</PackageReference>
 		<PackageReference Include="System.Memory" Version="4.5.5" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <PackageReference Include="AhoCorasick" Version="1.0.0" />
 	</ItemGroup>
 
 </Project>
