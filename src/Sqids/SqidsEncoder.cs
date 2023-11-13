@@ -1,3 +1,6 @@
+
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
 #if NET7_0_OR_GREATER
 using System.Numerics;
 #endif
@@ -220,7 +223,7 @@ public sealed class SqidsEncoder
 		{
 			var number = numbers[i];
 			var alphabetWithoutSeparator = alphabetTemp[1..]; // NOTE: Excludes the first character — which is the separator
-			var encodedNumber = ToId(number, alphabetWithoutSeparator);
+			var encodedNumber = ToId(number, alphabetWithoutSeparator, builder);
 			builder.Append(encodedNumber);
 
 			if (i >= numbers.Length - 1) // NOTE: If the last one
@@ -245,6 +248,31 @@ public sealed class SqidsEncoder
 		}
 
 		string result = builder.ToString();
+		var x = CollectionsMarshal.AsSpan(new List<char>());
+		var y = CollectionsMarshal.AsSpan(new List<byte>());
+
+		Encoding.ASCII.GetString(y);
+		new string()
+
+		var j = new byte[16];
+		new string(j);
+		var l = (char[])j;
+		StringMarshalling.Utf8.ToString()
+		Utf8StringMarshaller.ConvertToManaged(j);
+
+		unsafe
+		{
+			// The "fixed" statement tells the runtime to keep the array in the same
+			// place in memory (relocating it would make the pointer invalid)
+			fixed (sbyte* ptr_byte = &y[0])
+			{
+				result = new string(ptr_byte, 0, y.Length);
+			}
+
+			// The end of the "fixed" block tells the runtime that the original array
+			// is available for relocation and/or garbage collection again
+		}
+
 
 		if (IsBlockedId(result.AsSpan()))
 			result = Encode(numbers, increment + 1);
@@ -370,29 +398,27 @@ public sealed class SqidsEncoder
 	}
 
 #if NET7_0_OR_GREATER
-	private static ReadOnlySpan<char> ToId(T num, ReadOnlySpan<char> alphabet)
+	private static void ToId(T num, ReadOnlySpan<char> alphabet, StringBuilder builder)
 #else
-	private static ReadOnlySpan<char> ToId(int num, ReadOnlySpan<char> alphabet)
+	private static void ToId(int num, ReadOnlySpan<char> alphabet, StringBuilder builder)
 #endif
 	{
-		var id = new StringBuilder();
-		var result = num;
-
+		var start = builder.Length;
 #if NET7_0_OR_GREATER
 		do
 		{
-			id.Insert(0, alphabet[int.CreateChecked(result % T.CreateChecked(alphabet.Length))]);
-			result = result / T.CreateChecked(alphabet.Length);
-		} while (result > T.Zero);
+			builder.Append(alphabet[int.CreateChecked(num % T.CreateChecked(alphabet.Length))]);
+			num = num / T.CreateChecked(alphabet.Length);
+		} while (num > T.Zero);
 #else
 		do
 		{
-			id.Insert(0, alphabet[result % alphabet.Length]);
-			result = result / alphabet.Length;
-		} while (result > 0);
+			builder.Append(alphabet[num % alphabet.Length]);
+			num = num / alphabet.Length;
+		} while (num > 0);
 #endif
-
-		return id.ToString().AsSpan(); // TODO: possibly avoid creating a string
+		Array.Reverse(builder.m_ChunkChars);
+		MemoryMarshal.GetArrayDataReference(builder)
 	}
 
 #if NET7_0_OR_GREATER
@@ -412,4 +438,9 @@ public sealed class SqidsEncoder
 #endif
 		return result;
 	}
+}
+
+public class Sho : StringBuilder
+{
+
 }
