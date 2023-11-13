@@ -23,7 +23,6 @@ public sealed class SqidsEncoder
 {
 	private const int MinAlphabetLength = 3;
 	private const int MaxMinLength = 255;
-	private const int MaxStackallocSize = 256; // NOTE: In bytes — this value is essentially arbitrary, the Microsoft docs is using 1024 but recommends being more conservative when choosing the value (https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/operators/stackalloc), Hashids apparently uses 512 (https://github.com/ullmark/hashids.net/blob/9b1c69de4eedddf9d352c96117d8122af202e90f/src/Hashids.net/Hashids.cs#L17), and this article (https://vcsjones.dev/stackalloc/) uses 256. I've tried to be pretty cautious and gone with a low value.
 
 	private readonly char[] _alphabet;
 	private readonly int _minLength;
@@ -206,9 +205,7 @@ public sealed class SqidsEncoder
 		offset = (numbers.Length + offset) % _alphabet.Length;
 		offset = (offset + increment) % _alphabet.Length;
 
-		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize // NOTE: We multiply the number of characters by the size of a `char` to get the actual amount of memory that would be allocated.
-			? new char[_alphabet.Length]
-			: stackalloc char[_alphabet.Length];
+		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
 		var alphabetSpan = _alphabet.AsSpan();
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
@@ -290,9 +287,7 @@ public sealed class SqidsEncoder
 		char prefix = id[0];
 		int offset = alphabetSpan.IndexOf(prefix);
 
-		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize
-			? new char[_alphabet.Length]
-			: stackalloc char[_alphabet.Length];
+		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
 
