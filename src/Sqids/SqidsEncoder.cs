@@ -1,3 +1,6 @@
+
+using System.Buffers;
+using System.Runtime.InteropServices;
 #if NET7_0_OR_GREATER
 using System.Numerics;
 #endif
@@ -27,7 +30,7 @@ public sealed class SqidsEncoder
 
 	private readonly byte[] _alphabet;
 	private readonly int _minLength;
-	private readonly string[] _blockList;
+	private readonly byte[][] _blockList;
 
 #if NET7_0_OR_GREATER
 	/// <summary>
@@ -110,9 +113,9 @@ public sealed class SqidsEncoder
 			w.Any(c => !options.Alphabet.Contains(c, StringComparison.OrdinalIgnoreCase))
 #endif
 		);
-		_blockList = options.BlockList.ToArray(); // NOTE: Arrays are faster to iterate than HashSets, so we construct an array here.
+		_blockList = options.BlockList.Select(b => Encoding.ASCII.GetBytes(b)).ToArray(); // NOTE: Arrays are faster to iterate than HashSets, so we construct an array here.
 
-		_alphabet = Encoding.UTF8.GetBytes(options.Alphabet);
+		_alphabet = Encoding.ASCII.GetBytes(options.Alphabet);
 		ConsistentShuffle(_alphabet);
 	}
 
@@ -216,46 +219,42 @@ public sealed class SqidsEncoder
 		byte prefix = alphabetTemp[0];
 		alphabetTemp.Reverse();
 
-		var builder = new StringBuilder(); // TODO: pool a la Hashids.net?
-		builder.Append(prefix);
+		List<byte> builder = new List<byte>(); // TODO: pool a la Hashids.net?
+		builder.Add(prefix);
 
 		for (int i = 0; i < numbers.Length; i++)
 		{
 			var number = numbers[i];
 			var alphabetWithoutSeparator = alphabetTemp[1..]; // NOTE: Excludes the first character — which is the separator
-			var encodedNumber = ToId(number, alphabetWithoutSeparator);
-			builder.Append(encodedNumber);
+			ToId(number, alphabetWithoutSeparator, builder);
 
 			if (i >= numbers.Length - 1) // NOTE: If the last one
 				continue;
 
 			byte separator = alphabetTemp[0];
-			builder.Append(separator);
+			builder.Add(separator);
 			ConsistentShuffle(alphabetTemp);
 		}
 
-		if (builder.Length < _minLength)
+		if (builder.Count < _minLength)
 		{
 			byte separator = alphabetTemp[0];
-			builder.Append(separator);
+			builder.Add(separator);
 
-			while (builder.Length < _minLength)
+			while (builder.Count < _minLength)
 			{
 				ConsistentShuffle(alphabetTemp);
-				int toIndex = Math.Min(_minLength - builder.Length, _alphabet.Length);
-				foreach (var b in alphabetTemp[..toIndex])
-				{
-					builder.Append(b);
-				}
+				int toIndex = Math.Min(_minLength - builder.Count, _alphabet.Length);
+				builder.AddRange(alphabetTemp[..toIndex].ToArray());
 			}
 		}
 
-		string result = builder.ToString();
+		var builderSpan = CollectionsMarshal.AsSpan(builder);
 
-		if (IsBlockedId(result.AsSpan()))
-			result = Encode(numbers, increment + 1);
+		if (IsBlockedId(builderSpan))
+			return Encode(numbers, increment + 1);
 
-		return result;
+		return Encoding.ASCII.GetString(builderSpan);
 	}
 
 	/// <summary>
@@ -340,7 +339,7 @@ public sealed class SqidsEncoder
 	/// if the ID represents a single number); or an empty array if the input ID is null,
 	/// empty, or includes characters not found in the alphabet.
 	/// </returns>
-	public IReadOnlyList<T> Decode(string id) => Decode(Encoding.UTF8.GetBytes(id));
+	public IReadOnlyList<T> Decode(string id) => Decode(Encoding.ASCII.GetBytes(id));
 #else
 	/// <summary>
 	/// Decodes an ID into numbers.
@@ -351,21 +350,23 @@ public sealed class SqidsEncoder
 	/// if the ID represents a single number); or an empty array if the input ID is null,
 	/// empty, or includes characters not found in the alphabet.
 	/// </returns>
-	public IReadOnlyList<int> Decode(string id) => Decode(Encoding.UTF8.GetBytes(id));
+	public IReadOnlyList<int> Decode(string id) => Decode(Encoding.ASCII.GetBytes(id));
 #endif
 
-	private bool IsBlockedId(ReadOnlySpan<char> id)
+	private bool IsBlockedId(ReadOnlySpan<byte> id)
 	{
-		foreach (string word in _blockList)
+		foreach (byte[] word in _blockList)
 		{
 			if (word.Length > id.Length)
 				continue;
 
 			if ((id.Length <= 3 || word.Length <= 3) &&
-				id.Equals(word.AsSpan(), StringComparison.OrdinalIgnoreCase))
+			    id.Contains()
+
+				id.Contains(word.AsSpan(), StringComparison.OrdinalIgnoreCase))
 				return true;
 
-			if (word.Any(char.IsDigit) &&
+			if (word.Any(byte.IsDigit) &&
 				(id.StartsWith(word.AsSpan(), StringComparison.OrdinalIgnoreCase) ||
 				 id.EndsWith(word.AsSpan(), StringComparison.OrdinalIgnoreCase)))
 				return true;
@@ -388,29 +389,27 @@ public sealed class SqidsEncoder
 	}
 
 #if NET7_0_OR_GREATER
-	private static ReadOnlySpan<char> ToId(T num, ReadOnlySpan<byte> alphabet)
+	private static void ToId(T num, ReadOnlySpan<byte> alphabet, List<byte> builder)
 #else
-	private static ReadOnlySpan<char> ToId(int num, ReadOnlySpan<byte> alphabet)
+	private static void ToId(int num, ReadOnlySpan<byte> alphabet, List<byte> builder)
 #endif
 	{
-		var id = new StringBuilder();
-		var result = num;
-
+		var start = builder.Count;
 #if NET7_0_OR_GREATER
 		do
 		{
-			id.Insert(0, alphabet[int.CreateChecked(result % T.CreateChecked(alphabet.Length))]);
-			result = result / T.CreateChecked(alphabet.Length);
-		} while (result > T.Zero);
+			builder.Add(alphabet[int.CreateChecked(num % T.CreateChecked(alphabet.Length))]);
+			num = num / T.CreateChecked(alphabet.Length);
+		} while (num > T.Zero);
 #else
 		do
 		{
-			id.Insert(0, alphabet[result % alphabet.Length]);
-			result = result / alphabet.Length;
-		} while (result > 0);
+			builder.Add(alphabet[num % alphabet.Length]);
+			num = num / alphabet.Length;
+		} while (num > 0);
 #endif
 
-		return id.ToString().AsSpan(); // TODO: possibly avoid creating a string
+		builder.Reverse(start, builder.Count - start);
 	}
 
 #if NET7_0_OR_GREATER
