@@ -46,8 +46,4 @@
 		<PackageReference Include="System.Memory" Version="4.5.5" />
 	</ItemGroup>
 
-	<ItemGroup>
-	  <PackageReference Include="AhoCorasick" Version="1.0.0" />
-	</ItemGroup>
-
 </Project>

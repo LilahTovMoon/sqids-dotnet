@@ -1,8 +1,5 @@
-
 using System.Runtime.InteropServices;
-using Ganss.Text;
 #if NET7_0_OR_GREATER
-using System.Runtime.InteropServices.Marshalling;
 using System.Numerics;
 #endif
 
@@ -30,7 +27,6 @@ public sealed class SqidsEncoder
 
 	private readonly char[] _alphabet;
 	private readonly int _minLength;
-	private readonly string[] _blockList;
 	private readonly AhoCorasick _ahoCorasick;
 
 #if NET7_0_OR_GREATER
@@ -114,11 +110,8 @@ public sealed class SqidsEncoder
 			w.Any(c => !options.Alphabet.Contains(c, StringComparison.OrdinalIgnoreCase))
 #endif
 		);
-		_blockList = options.BlockList.ToArray(); // NOTE: Arrays are faster to iterate than HashSets, so we construct an array here.
 
-		var sho = _blockList.Select(b => b.ToCharArray().Select(LeetComparator.Leetifier).ToString());
-
-		_ahoCorasick = new AhoCorasick(new LeetComparator(), sho);
+		_ahoCorasick = new AhoCorasick(options.BlockList);
 
 		_alphabet = options.Alphabet.ToArray();
 		ConsistentShuffle(_alphabet);
@@ -252,20 +245,19 @@ public sealed class SqidsEncoder
 		}
 
 #if NET7_0_OR_GREATER
-		string toCheck = new string(CollectionsMarshal.AsSpan(builder));
+		Span<char> toCheck = CollectionsMarshal.AsSpan(builder);
 #else
-		string toCheck = new string(builder.ToArray());
+		Span<char> toCheck = builder.ToArray().AsSpan();
 #endif
 
 		if (IsBlockedId(toCheck))
 			return Encode(numbers, increment + 1);
 
-// #if NET7_0_OR_GREATER
-// 		return new string(CollectionsMarshal.AsSpan(builder));
-// #else
-// 		return new string(builder.ToArray());
-// #endif
-		return toCheck;
+#if NET7_0_OR_GREATER
+		return new string(CollectionsMarshal.AsSpan(builder));
+#else
+		return new string(builder.ToArray());
+#endif
 	}
 
 	/// <summary>
@@ -352,19 +344,9 @@ public sealed class SqidsEncoder
 	public IReadOnlyList<int> Decode(string id) => Decode(id.AsSpan());
 #endif
 
-	public bool IsBlockedId(string id)
+	public bool IsBlockedId(ReadOnlySpan<char> id)
 	{
-// 		// Span<char> output = stackalloc char[id.Length];
-// 		// for (var i = 0; i < id.Length; i++)
-// 		// {
-// 		// 	output[i] = Leetifier(id[i]);
-// 		// }
-// #if NET7_0_OR_GREATER
-// 		string toCheck = new string(id);
-// #else
-// 		string toCheck = new string(id.ToArray());
-// #endif
-		return _ahoCorasick.Search(id).Any();
+		return _ahoCorasick.Search(id);
 	}
 
 	// NOTE: Shuffles a span of characters in place. The shuffle produces consistent results.
