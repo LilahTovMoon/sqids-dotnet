@@ -29,8 +29,6 @@ public class AhoCorasick
 
 	public bool Search(ReadOnlySpan<char> text)
 	{
-		if (text == null) return false;
-
 		var current = Trie;
 
 		for (int i = 0; i < text.Length; i++)
