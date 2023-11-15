@@ -1,3 +1,5 @@
+
+using System.Buffers;
 #if NET7_0_OR_GREATER
 using System.Numerics;
 #endif
@@ -28,6 +30,22 @@ public sealed class SqidsEncoder
 	private readonly char[] _alphabet;
 	private readonly int _minLength;
 	private readonly string[] _blockList;
+#if NET8_0_OR_GREATER
+	private readonly SearchValues<char>[] _searchValues = new SearchValues<char>[]
+	{
+		SearchValues.Create("0"),
+		SearchValues.Create("1"),
+		SearchValues.Create("2"),
+		SearchValues.Create("3"),
+		SearchValues.Create("4"),
+		SearchValues.Create("5"),
+		SearchValues.Create("6"),
+		SearchValues.Create("7"),
+		SearchValues.Create("8"),
+		SearchValues.Create("9"),
+	};
+#endif
+
 
 #if NET7_0_OR_GREATER
 	/// <summary>
@@ -114,6 +132,9 @@ public sealed class SqidsEncoder
 
 		_alphabet = options.Alphabet.ToCharArray();
 		ConsistentShuffle(_alphabet);
+#if NET8_0_OR_GREATER
+		SearchValues.Create("a");
+#endif
 	}
 
 	/// <summary>
@@ -289,12 +310,13 @@ public sealed class SqidsEncoder
 
 		char prefix = id[0];
 		int offset = alphabetSpan.IndexOf(prefix);
-
+		Console.WriteLine(_alphabet);
 		Span<char> alphabetTemp = _alphabet.Length * sizeof(char) > MaxStackallocSize
 			? new char[_alphabet.Length]
 			: stackalloc char[_alphabet.Length];
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
+		Console.WriteLine(alphabetTemp.ToArray());
 
 		alphabetTemp.Reverse();
 
