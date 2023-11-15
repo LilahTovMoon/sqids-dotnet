@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.InteropServices;
 #if NET7_0_OR_GREATER
 using System.Numerics;
@@ -27,7 +28,12 @@ public sealed class SqidsEncoder
 
 	private readonly char[] _alphabet;
 	private readonly int _minLength;
+	private readonly int _maxLength;
 	private readonly AhoCorasick _ahoCorasick;
+
+#if NET7_0_OR_GREATER
+	private readonly T _alphabetLength;
+#endif
 
 #if NET7_0_OR_GREATER
 	/// <summary>
@@ -114,6 +120,12 @@ public sealed class SqidsEncoder
 		_ahoCorasick = new AhoCorasick(options.BlockList);
 
 		_alphabet = options.Alphabet.ToArray();
+#if NET7_0_OR_GREATER
+		_maxLength = (int) Math.Ceiling(Math.Log(double.CreateChecked(T.MaxValue)) / Math.Log(_alphabet.Length - 2) + 1);
+		_alphabetLength = T.CreateChecked(_alphabet.Length);
+#else
+		_maxLength = (int) Math.Ceiling(Math.Log(int.MaxValue) / Math.Log(_alphabet.Length - 2) + 1);
+#endif
 		ConsistentShuffle(_alphabet);
 	}
 
@@ -125,9 +137,9 @@ public sealed class SqidsEncoder
 	/// <exception cref="T:System.ArgumentOutOfRangeException">If the number passed is smaller than 0 (i.e. negative).</exception>
 	/// <exception cref="T:System.ArgumentException">If the encoding reaches maximum re-generation attempts due to the blocklist.</exception>
 #if NET7_0_OR_GREATER
-	public string Encode(T number)
+	public string Encode(T number, int increment = 0)
 #else
-	public string Encode(int number)
+	public string Encode(int number, int increment = 0)
 #endif
 	{
 #if NET7_0_OR_GREATER
@@ -140,7 +152,55 @@ public sealed class SqidsEncoder
 				"Encoding is only supported for zero and positive numbers."
 			);
 
-		return Encode(stackalloc[] { number }); // NOTE: We use `stackalloc` here in order not to incur the cost of allocating an array on the heap, since we know the array will only have one element, we can use `stackalloc` safely.
+		if (increment > _alphabet.Length)
+			throw new ArgumentException("Reached max attempts to re-generate the ID.");
+
+#if NET7_0_OR_GREATER
+		int offset = _alphabet[int.CreateChecked(number % _alphabetLength)];
+#else
+        int offset = _alphabet[number % _alphabet.Length];
+#endif
+		offset = (1 + offset) % _alphabet.Length;
+		offset = (offset + increment) % _alphabet.Length;
+
+		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
+		var alphabetSpan = _alphabet.AsSpan();
+		alphabetSpan[offset..].CopyTo(alphabetTemp);
+		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
+
+		Span<char> builder = stackalloc char[_maxLength]; // TODO: pool a la Hashids.net?
+		int builderIndex = 1;
+		builder[0] = alphabetTemp[0];
+		alphabetTemp.Reverse();
+
+
+#if NET7_0_OR_GREATER
+		ToId(number, alphabetTemp[1..], builder, ref builderIndex, _alphabetLength);
+#else
+		ToId(number, alphabetTemp[1..], builder, ref builderIndex);
+#endif
+
+		if (builderIndex < _minLength)
+		{
+			builder[builderIndex++] = alphabetTemp[0];
+
+			if (builderIndex < _minLength)
+			{
+				ConsistentShuffle(alphabetTemp);
+				int toIndex = Math.Min(_minLength - builderIndex, _alphabet.Length);
+				alphabetTemp[..toIndex].CopyTo(builder[builderIndex..]);
+				builderIndex += toIndex;
+			}
+		}
+
+		if (IsBlockedId(builder[..builderIndex]))
+			return Encode(number, increment + 1);
+
+#if NET7_0_OR_GREATER
+		return new string(builder[..builderIndex]);
+#else
+		return new string(builder[..builderIndex].ToArray());
+#endif
 	}
 
 	/// <summary>
@@ -200,7 +260,7 @@ public sealed class SqidsEncoder
 		int offset = 0;
 		for (int i = 0; i < numbers.Length; i++)
 #if NET7_0_OR_GREATER
-			offset += _alphabet[int.CreateChecked(numbers[i] % T.CreateChecked(_alphabet.Length))] + i;
+			offset += _alphabet[int.CreateChecked(numbers[i] % _alphabetLength)] + i;
 #else
 			offset += _alphabet[numbers[i] % _alphabet.Length] + i;
 #endif
@@ -212,53 +272,81 @@ public sealed class SqidsEncoder
 		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
 
-		char prefix = alphabetTemp[0];
+		Span<char> builder = stackalloc char[_maxLength]; // TODO: pool a la Hashids.net?
+		int builderIndex = 1;
+		builder[0] = alphabetTemp[0];
 		alphabetTemp.Reverse();
-
-		var builder = new List<char>(16) { prefix }; // TODO: pool a la Hashids.net?
 
 		for (int i = 0; i < numbers.Length; i++)
 		{
 			var number = numbers[i];
 			var alphabetWithoutSeparator = alphabetTemp[1..]; // NOTE: Excludes the first character — which is the separator
-			ToId(number, alphabetWithoutSeparator, builder);
+#if NET7_0_OR_GREATER
+            ToId(number, alphabetWithoutSeparator, builder, ref builderIndex, _alphabetLength);
+#else
+			ToId(number, alphabetWithoutSeparator, builder, ref builderIndex);
+#endif
 
 			if (i >= numbers.Length - 1) // NOTE: If the last one
 				continue;
 
-			char separator = alphabetTemp[0];
-			builder.Add(separator);
+			builder[builderIndex++] = alphabetTemp[0];
 			ConsistentShuffle(alphabetTemp);
 		}
 
-		if (builder.Count < _minLength)
+		if (builderIndex < _minLength)
 		{
-			char separator = alphabetTemp[0];
-			builder.Add(separator);
+			builder[builderIndex++] = alphabetTemp[0];
 
-			while (builder.Count < _minLength)
+			if (builderIndex < _minLength)
 			{
 				ConsistentShuffle(alphabetTemp);
-				int toIndex = Math.Min(_minLength - builder.Count, _alphabet.Length);
-				builder.AddRange(alphabetTemp[..toIndex].ToArray());
+				int toIndex = Math.Min(_minLength - builderIndex, _alphabet.Length);
+				alphabetTemp[..toIndex].CopyTo(builder[builderIndex..]);
+				builderIndex += toIndex;
 			}
 		}
 
-#if NET7_0_OR_GREATER
-		Span<char> toCheck = CollectionsMarshal.AsSpan(builder);
-#else
-		Span<char> toCheck = builder.ToArray().AsSpan();
-#endif
-
-		if (IsBlockedId(toCheck))
+		if (IsBlockedId(builder[..builderIndex]))
 			return Encode(numbers, increment + 1);
 
 #if NET7_0_OR_GREATER
-		return new string(CollectionsMarshal.AsSpan(builder));
+		return new string(builder[..builderIndex]);
 #else
-		return new string(builder.ToArray());
+		return new string(builder[..builderIndex].ToArray());
 #endif
 	}
+
+#if NET7_0_OR_GREATER
+	public T DecodeOne(ReadOnlySpan<char> id)
+#else
+	public int DecodeOne(ReadOnlySpan<char> id)
+#endif
+	{
+		if (id.IsEmpty)
+			return default;
+		var alphabetSpan = _alphabet.AsSpan();
+
+		char prefix = id[0];
+		int offset = alphabetSpan.IndexOf(prefix);
+
+		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
+		alphabetSpan[offset..].CopyTo(alphabetTemp);
+		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
+
+		alphabetTemp.Reverse();
+
+		id = id[1..]; // NOTE: Exclude the prefix
+
+		var separatorIndex = id.IndexOf(alphabetTemp[0]);
+		id = separatorIndex == -1 ? id : id[..separatorIndex]; // NOTE: The first part of `id` (every thing to the left of the separator) represents the number that we ought to decode.
+
+		if (id.IsEmpty)
+			return default;
+
+		return ToNumber(id, alphabetTemp[1..]);
+	}
+
 
 	/// <summary>
 	/// Decodes an ID into numbers.
@@ -282,13 +370,13 @@ public sealed class SqidsEncoder
 			return Array.Empty<int>();
 #endif
 
-		foreach (char c in id)
-			if (!_alphabet.Contains(c))
-#if NET7_0_OR_GREATER
-				return Array.Empty<T>();
-#else
-				return Array.Empty<int>();
-#endif
+// 		foreach (char c in id)
+// 			if (!_alphabet.Contains(c))
+// #if NET7_0_OR_GREATER
+// 				return Array.Empty<T>();
+// #else
+// 				return Array.Empty<int>();
+// #endif
 
 		var alphabetSpan = _alphabet.AsSpan();
 
@@ -296,7 +384,7 @@ public sealed class SqidsEncoder
 		int offset = alphabetSpan.IndexOf(prefix);
 
 		Span<char> alphabetTemp = stackalloc char[_alphabet.Length];
-		alphabetSpan[offset..].CopyTo(alphabetTemp[..^offset]);
+		alphabetSpan[offset..].CopyTo(alphabetTemp);
 		alphabetSpan[..offset].CopyTo(alphabetTemp[^offset..]);
 
 		alphabetTemp.Reverse();
@@ -304,9 +392,9 @@ public sealed class SqidsEncoder
 		id = id[1..]; // NOTE: Exclude the prefix
 
 #if NET7_0_OR_GREATER
-		var result = new List<T>();
+		var result = new List<T>(1);
 #else
-		var result = new List<int>();
+		var result = new List<int>(1);
 #endif
 		while (!id.IsEmpty)
 		{
@@ -319,8 +407,7 @@ public sealed class SqidsEncoder
 			if (chunk.IsEmpty)
 				return result;
 
-			var alphabetWithoutSeparator = alphabetTemp[1..]; // NOTE: Exclude the first character — which is the separator
-			var decodedNumber = ToNumber(chunk, alphabetWithoutSeparator);
+			var decodedNumber = ToNumber(chunk, alphabetTemp[1..]);
 			result.Add(decodedNumber);
 
 			if (!id.IsEmpty)
@@ -360,27 +447,26 @@ public sealed class SqidsEncoder
 	}
 
 #if NET7_0_OR_GREATER
-	private static void ToId(T num, ReadOnlySpan<char> alphabet, List<char> builder)
+	private static void ToId(T num, ReadOnlySpan<char> alphabet, Span<char> builder, ref int builderIndex, T alphabetLength)
 #else
-	private static void ToId(int num, ReadOnlySpan<char> alphabet, List<char> builder)
+	private static void ToId(int num, ReadOnlySpan<char> alphabet, Span<char> builder, ref int builderIndex)
 #endif
 	{
-		int start = builder.Count;
+		int start = builderIndex;
 #if NET7_0_OR_GREATER
-		T length = T.CreateChecked(alphabet.Length);
 		do
 		{
-			builder.Add(alphabet[int.CreateChecked(num % length)]);
-			num /= T.CreateChecked(alphabet.Length);
+			builder[builderIndex++] = alphabet[int.CreateChecked(num % alphabetLength)];
+			num /= alphabetLength;
 		} while (num > T.Zero);
 #else
 		do
 		{
-			builder.Add(alphabet[num % alphabet.Length]);
+			builder[builderIndex++] = alphabet[num % alphabet.Length];
 			num /= alphabet.Length;
 		} while (num > 0);
 #endif
-		builder.Reverse(start, builder.Count - start);
+		builder[start..builderIndex].Reverse();
 	}
 
 #if NET7_0_OR_GREATER
@@ -391,8 +477,12 @@ public sealed class SqidsEncoder
 	{
 #if NET7_0_OR_GREATER
 		T result = T.Zero;
+		T alphabetLength = T.CreateChecked(alphabet.Length);
 		foreach (var character in id)
-			result = result * T.CreateChecked(alphabet.Length) + T.CreateChecked(alphabet.IndexOf(character));
+			result = result * alphabetLength + T.CreateChecked(alphabet.IndexOf(character)); //TODO Sho: create an array of ASCII to the value thingy
+		//that probably wont be faster because it'd be different for every alphabet iteration and creating the array would take longer
+		//though one could precompute the 62 different arrays and go with that?
+		//no because they get shuffled.
 #else
 		int result = 0;
 		foreach (var character in id)
@@ -400,4 +490,6 @@ public sealed class SqidsEncoder
 #endif
 		return result;
 	}
+
+
 }
